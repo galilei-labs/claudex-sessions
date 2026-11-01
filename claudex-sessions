@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""claude-sessions: list Claude Code and Codex sessions, live and past, with a fuzzy picker.
+"""claudex-sessions: list Claude Code and Codex sessions, live and past, with a fuzzy picker.
 
 Claude: live sessions come from the registry in ~/.claude/sessions/<pid>.json
 (kept only while the process is alive); past ones from ~/.claude/projects.
@@ -8,24 +8,24 @@ process holds its lock in ~/.codex/thread-writer-locks.
 Green dot = live, grey dot = past (revivable with `claude --resume` / `codex resume`).
 
 Usage:
-  claude-sessions [QUERY...]        interactive picker (QUERY pre-fills the filter)
-  claude-sessions -r | --resume     picker, then revive the chosen session in its cwd
-  claude-sessions -R                same, with --dangerously-skip-permissions
-  claude-sessions -r -- FLAGS...    extra FLAGS are passed through to claude / codex
-  claude-sessions -l | --list       plain table, no interaction
-  claude-sessions --live            only sessions that are currently running
-  claude-sessions --json            sessions as JSON
-  claude-sessions --cwd  [QUERY]    print the chosen session's working directory
-  claude-sessions --name [QUERY]    print the chosen session's name
-  claude-sessions -n N              keep only the N most recent past sessions
-  claude-sessions --claude|--codex  only sessions of that tool (type "codex" to filter too)
+  claudex-sessions [QUERY...]        interactive picker (QUERY pre-fills the filter)
+  claudex-sessions -r | --resume     picker, then revive the chosen session in its cwd
+  claudex-sessions -R                same, with --dangerously-skip-permissions
+  claudex-sessions -r -- FLAGS...    extra FLAGS are passed through to claude / codex
+  claudex-sessions -l | --list       plain table, no interaction
+  claudex-sessions --live            only sessions that are currently running
+  claudex-sessions --json            sessions as JSON
+  claudex-sessions --cwd  [QUERY]    print the chosen session's working directory
+  claudex-sessions --name [QUERY]    print the chosen session's name
+  claudex-sessions -n N              keep only the N most recent past sessions
+  claudex-sessions --claude|--codex  only sessions of that tool (type "codex" to filter too)
 
-  claude-sessions -f | --focus      bring the chosen live session's terminal tab to front
-  claude-sessions --no-focus        never focus (default when stdout is not a TTY)
+  claudex-sessions -f | --focus      bring the chosen live session's terminal tab to front
+  claudex-sessions --no-focus        never focus (default when stdout is not a TTY)
 
 Enter on a live session focuses its Terminal.app / iTerm2 tab (when stdout is a
 TTY). The session ID is always printed to stdout (details go to stderr), so it
-composes:   cd "$(claude-sessions --cwd)"     claude --resume "$(claude-sessions)"
+composes:   cd "$(claudex-sessions --cwd)"     claude --resume "$(claudex-sessions)"
 
 Keys: type to filter · ↑/↓ or ^P/^N move · Enter select · Esc/^C quit
 """
@@ -41,7 +41,7 @@ from pathlib import Path
 SESS_DIR = Path.home() / ".claude" / "sessions"
 PROJ_DIR = Path.home() / ".claude" / "projects"
 CODEX_DIR = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
-CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "claude-sessions" / "index.json"
+CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "claudex-sessions" / "index.json"
 
 # ── ANSI helpers ─────────────────────────────────────────────────────────────
 ESC = "\x1b["

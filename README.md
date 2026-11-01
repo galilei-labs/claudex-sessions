@@ -1,10 +1,10 @@
-# claude-sessions
+# claudex-sessions
 
 A tiny CLI for [Claude Code](https://claude.com/claude-code) and
 [Codex](https://github.com/openai/codex) that lists your sessions, live and
 past, and lets you jump to one by typing a few letters.
 
-![claude-sessions picker](docs/screenshot.png)
+![claudex-sessions picker](docs/screenshot.png)
 
 
 `●` green: running (yellow while busy). `○` grey: past session, revivable.
@@ -19,7 +19,7 @@ Requires Python 3.8+ on macOS or Linux. No dependencies.
 ```sh
 git clone https://github.com/galilei-labs/claude-sessions.git
 cd claude-sessions
-ln -sf "$PWD/claude-sessions" ~/.local/bin/cs
+ln -sf "$PWD/claudex-sessions" ~/.local/bin/cs
 ```
 
 Make sure `~/.local/bin` is on your `PATH`. Use any name you like for the link.
@@ -63,7 +63,7 @@ resumed twice.
 Live sessions come from the registry Claude Code keeps in
 `~/.claude/sessions/<pid>.json`, filtered to processes that are still alive.
 Past sessions come from the transcripts in `~/.claude/projects/`; a small
-index in `~/.cache/claude-sessions/` keeps repeat runs under 0.1 s.
+index in `~/.cache/claudex-sessions/` keeps repeat runs under 0.1 s.
 
 Codex threads come from `~/.codex/state_*.sqlite` (read-only). A thread is
 live while a `codex` process holds its lock in `~/.codex/thread-writer-locks/`;

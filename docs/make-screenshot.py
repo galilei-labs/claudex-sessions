@@ -1,8 +1,8 @@
 import importlib.util, time, re, html, sys
 spec = importlib.util.spec_from_loader("cs", loader=None)
 import types
-m = types.ModuleType("cs"); m.__file__ = "claude-sessions"
-exec(open("claude-sessions").read().split('if __name__ == "__main__"')[0], m.__dict__)
+m = types.ModuleType("cs"); m.__file__ = "claudex-sessions"
+exec(open("claudex-sessions").read().split('if __name__ == "__main__"')[0], m.__dict__)
 
 now = int(time.time()*1000)
 def S(name, cwd, ago_s, status="idle", pid=None, user=True, ai=None):
