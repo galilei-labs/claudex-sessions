@@ -17,8 +17,8 @@ and show their thread name.
 Requires Python 3.8+ on macOS or Linux. No dependencies.
 
 ```sh
-git clone https://github.com/galilei-labs/claude-sessions.git
-cd claude-sessions
+git clone https://github.com/galilei-labs/claudex-sessions.git
+cd claudex-sessions
 ln -sf "$PWD/claudex-sessions" ~/.local/bin/cs
 ```
 
