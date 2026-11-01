@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-"""claude-sessions: list Claude Code sessions, live and past, with a fuzzy picker.
+"""claude-sessions: list Claude Code and Codex sessions, live and past, with a fuzzy picker.
 
-Live sessions come from the registry in ~/.claude/sessions/<pid>.json (kept only
-while the process is alive); past ones from the transcripts in ~/.claude/projects.
-Green dot = live, grey dot = past (revivable with `claude --resume`).
+Claude: live sessions come from the registry in ~/.claude/sessions/<pid>.json
+(kept only while the process is alive); past ones from ~/.claude/projects.
+Codex: threads come from ~/.codex/state_*.sqlite; a thread is live while a codex
+process holds its lock in ~/.codex/thread-writer-locks.
+Green dot = live, grey dot = past (revivable with `claude --resume` / `codex resume`).
 
 Usage:
   claude-sessions [QUERY...]        interactive picker (QUERY pre-fills the filter)
   claude-sessions -r | --resume     picker, then revive the chosen session in its cwd
   claude-sessions -R                same, with --dangerously-skip-permissions
-  claude-sessions -r -- FLAGS...    extra FLAGS are passed through to claude
+  claude-sessions -r -- FLAGS...    extra FLAGS are passed through to claude / codex
   claude-sessions -l | --list       plain table, no interaction
   claude-sessions --live            only sessions that are currently running
   claude-sessions --json            sessions as JSON
   claude-sessions --cwd  [QUERY]    print the chosen session's working directory
   claude-sessions --name [QUERY]    print the chosen session's name
   claude-sessions -n N              keep only the N most recent past sessions
+  claude-sessions --claude|--codex  only sessions of that tool (type "codex" to filter too)
 
   claude-sessions -f | --focus      bring the chosen live session's terminal tab to front
   claude-sessions --no-focus        never focus (default when stdout is not a TTY)
@@ -29,6 +32,7 @@ Keys: type to filter · ↑/↓ or ^P/^N move · Enter select · Esc/^C quit
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -36,6 +40,7 @@ from pathlib import Path
 
 SESS_DIR = Path.home() / ".claude" / "sessions"
 PROJ_DIR = Path.home() / ".claude" / "projects"
+CODEX_DIR = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "claude-sessions" / "index.json"
 
 # ── ANSI helpers ─────────────────────────────────────────────────────────────
@@ -183,23 +188,136 @@ def load_transcripts():
     return out
 
 
-def load_sessions(live_only=False, limit=None):
-    live = load_registry()
-    past = {} if live_only else load_transcripts()
+# ── Codex ────────────────────────────────────────────────────────────────────
+def codex_db():
+    """Newest ~/.codex/state_<N>.sqlite, or None."""
+    def ver(p):
+        m = re.search(r"state_(\d+)\.sqlite$", p.name)
+        return int(m.group(1)) if m else -1
+    dbs = sorted(CODEX_DIR.glob("state_*.sqlite"), key=ver)
+    return dbs[-1] if dbs else None
+
+
+def codex_locked_threads():
+    """IDs of Codex threads whose writer lock is held by a running process."""
+    lock_dir = CODEX_DIR / "thread-writer-locks"
+    locks = [str(p) for p in lock_dir.glob("*.lock")] if lock_dir.is_dir() else []
+    if not locks:
+        return set()
+    try:
+        out = subprocess.run(["lsof", "-Fn", *locks], capture_output=True,
+                             text=True, timeout=5).stdout
+    except Exception:  # no lsof: a lock file is removed when its thread closes
+        return {Path(p).stem for p in locks}
+    return {Path(l[1:]).stem for l in out.splitlines() if l.startswith("n")}
+
+
+def codex_tuis():
+    """Interactive codex processes as [(pid, cwd)], oldest pid first."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,tty=,comm="], capture_output=True,
+                             text=True, timeout=5).stdout
+    except Exception:
+        return []
+    pids = []
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[1] not in ("??", "?") \
+                and os.path.basename(parts[2]).lower() == "codex":
+            pids.append(parts[0])
+    if not pids:
+        return []
+    try:
+        out = subprocess.run(["lsof", "-a", "-d", "cwd", "-Fpn", "-p", ",".join(pids)],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return []
+    procs, pid = [], None
+    for l in out.splitlines():
+        if l.startswith("p"):
+            pid = int(l[1:])
+        elif l.startswith("n") and pid:
+            procs.append((pid, l[1:]))
+    return sorted(procs)
+
+
+def codex_status(rollout):
+    """'busy' if the last turn in the rollout is still running, else 'idle'."""
+    try:
+        with open(rollout, "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 65536))
+            tail = fh.read()
+    except OSError:
+        return "idle"
+    started = tail.rfind(b'"type":"task_started"')
+    ended = max(tail.rfind(b'"type":"task_complete"'), tail.rfind(b'"type":"turn_aborted"'))
+    return "busy" if started > ended else "idle"
+
+
+def load_codex(live_only=False):
+    db = codex_db()
+    if db is None:
+        return []
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        con.row_factory = sqlite3.Row
+        rows = con.execute(
+            "SELECT * FROM threads WHERE archived = 0 AND attached_thread_parent_id IS NULL "
+            "AND agent_role IS NULL AND (COALESCE(name, '') != '' OR first_user_message != '')"
+        ).fetchall()
+        con.close()
+    except sqlite3.Error:
+        return []
+    locked = codex_locked_threads()
+    tuis = codex_tuis()
+    out = []
+    # Oldest live thread first, so it pairs with the oldest codex process in its cwd.
+    for r in sorted(rows, key=lambda r: r["created_at_ms"] or 0):
+        r = dict(r)
+        alive = r["id"] in locked
+        if live_only and not alive:
+            continue
+        pid = None
+        if alive:
+            for i, (p, cwd) in enumerate(tuis):
+                if cwd == r["cwd"]:
+                    pid = tuis.pop(i)[0]
+                    break
+        prompt = " ".join((r.get("first_user_message") or "").split())[:60] or None
+        out.append({
+            "sessionId": r["id"], "tool": "codex", "alive": alive, "pid": pid,
+            "status": codex_status(r["rollout_path"]) if alive else "past",
+            "cwd": r["cwd"], "name": r.get("name") or prompt,
+            # Codex thread names (auto or /rename) are what `codex resume NAME` takes.
+            "nameSource": "user" if r.get("name") else "prompt",
+            "aiTitle": None, "prompts": None,
+            "startedAt": r.get("created_at_ms"), "updatedAt": r.get("updated_at_ms"),
+        })
+    return out
+
+
+def load_sessions(live_only=False, limit=None, tools=("claude", "codex")):
+    live = load_registry() if "claude" in tools else {}
+    past = {} if live_only or "claude" not in tools else load_transcripts()
     sessions = []
     for sid, d in live.items():
         t = past.get(sid)
         if t:
             d["aiTitle"] = t["ai"]
             d["prompts"] = t["prompts"]
+        d["tool"] = "claude"
         sessions.append(d)
     dead = []
+    if "codex" in tools:
+        for d in load_codex(live_only):
+            (sessions if d["alive"] else dead).append(d)
     for sid, t in past.items():
         if sid in live:
             continue
         name = t["custom"] or t["ai"] or t["firstPrompt"]
         dead.append({
-            "sessionId": sid, "alive": False, "pid": None, "status": "past",
+            "sessionId": sid, "tool": "claude", "alive": False, "pid": None, "status": "past",
             "cwd": t["cwd"], "name": name,
             "nameSource": "user" if t["custom"] else ("ai" if t["ai"] else "prompt"),
             "aiTitle": t["ai"], "prompts": t["prompts"],
@@ -252,7 +370,8 @@ def haystack(d):
     subsequence matches meaningless.
     """
     fuzzy_src = " ".join(str(x) for x in (
-        d.get("name"), d.get("aiTitle"), short_cwd(d.get("cwd")), d.get("status")) if x).lower()
+        d.get("name"), d.get("aiTitle"), short_cwd(d.get("cwd")), d.get("status"),
+        d.get("tool")) if x).lower()
     text = fuzzy_src + " " + " ".join(str(x) for x in (d.get("sessionId"), d.get("pid")) if x).lower()
     tokens = [t for t in re.split(r"[^a-z0-9]+", fuzzy_src) if t]
     return text, tokens
@@ -332,9 +451,11 @@ def row(d, width, selected=False, color=True):
     pad = max(0, 40 - len(plain_name))
     cwd = short_cwd(d.get("cwd"))
     pid = d.get("pid") or ""
-    right = f"{ago(d.get('updatedAt') or d.get('startedAt')):>4}  {st:<4} {pid:>6}"
+    tool = d.get("tool") or "claude"
+    tool_col = (MAGENTA if tool == "codex" else DIM) + f"{tool:<6}" + RESET
+    right = f"{ago(d.get('updatedAt') or d.get('startedAt')):>4}  {st:<4} {tool_col} {pid:>6}"
     # Trim cwd so the line fits the terminal.
-    used = 2 + len(plain_name) + pad + 2 + len(right) + 2
+    used = 2 + len(plain_name) + pad + 2 + len(strip_ansi(right)) + 2
     room = max(8, width - used)
     if len(cwd) > room:
         cwd = "…" + cwd[-(room - 1):]
@@ -564,17 +685,17 @@ def main(argv):
 
     want_resume = bool({"-r", "--resume", "-R", "--resume-skip-permissions"} & set(args))
     want_focus = ("-f" in args or "--focus" in args) or (sys.stdout.isatty() and "--no-focus" not in args)
-    if "-R" in args or "--resume-skip-permissions" in args:
-        extra = ["--dangerously-skip-permissions"] + extra
+    skip_perms = "-R" in args or "--resume-skip-permissions" in args
 
-    sessions = load_sessions(live_only="--live" in args, limit=limit)
+    tools = tuple(t for t in ("claude", "codex") if "--" + t in args) or ("claude", "codex")
+    sessions = load_sessions(live_only="--live" in args, limit=limit, tools=tools)
     color = sys.stderr.isatty() and "--no-color" not in args
 
     if "--json" in args:
         print(json.dumps(filter_sessions(sessions, query), indent=2))
         return 0
     if not sessions:
-        print("no Claude Code sessions found", file=sys.stderr)
+        print("no Claude Code or Codex sessions found", file=sys.stderr)
         return 1
 
     interactive = sys.stdin.isatty() and sys.stderr.isatty() and not ("-l" in args or "--list" in args)
@@ -585,7 +706,7 @@ def main(argv):
                 return 1
             d = matches[0]
             if want_resume and not d.get("alive"):
-                return resume(d, extra)
+                return resume(d, extra, skip_perms)
             if want_resume or "-f" in args or "--focus" in args:
                 if not d.get("alive"):
                     print(f"{d.get('name')} is not running (resume with -r)", file=sys.stderr)
@@ -601,7 +722,7 @@ def main(argv):
         return 130
     if want_resume:
         if not chosen.get("alive"):
-            return resume(chosen, extra)
+            return resume(chosen, extra, skip_perms)
         # A live session cannot be resumed a second time; go to its window instead.
         print(f"{DIM}{chosen.get('name')} is already running, focusing its window{RESET}", file=sys.stderr)
         return 0 if focus(chosen) else 1
@@ -614,26 +735,34 @@ def main(argv):
     else:
         dot, st = status_dot(chosen)
         tail = f"pid {chosen.get('pid')}  {st}" if chosen.get("alive") else \
-            f"{st}  revive: claude --resume {chosen.get('sessionId')}"
+            f"{st}  revive: {' '.join(resume_cmd(chosen))}"
         print(f"{dot} {BOLD}{chosen.get('name')}{RESET}  {DIM}{short_cwd(chosen.get('cwd'))}  "
               f"{tail}{RESET}", file=sys.stderr)
         print(chosen.get("sessionId"))
     return 0
 
 
-def resume(d, extra=()):
-    """Replace this process with `claude --resume <id> [extra...]` in the session's cwd."""
+def resume_cmd(d, skip_permissions=False, extra=()):
+    if d.get("tool") == "codex":
+        flags = ["--dangerously-bypass-approvals-and-sandbox"] if skip_permissions else []
+        return ["codex", "resume", *flags, d.get("sessionId"), *extra]
+    flags = ["--dangerously-skip-permissions"] if skip_permissions else []
+    return ["claude", "--resume", d.get("sessionId"), *flags, *extra]
+
+
+def resume(d, extra=(), skip_permissions=False):
+    """Replace this process with `claude --resume` / `codex resume` in the session's cwd."""
     cwd = d.get("cwd")
     if cwd and os.path.isdir(cwd):
         os.chdir(cwd)
     else:
         print(f"warning: cwd {cwd!r} missing, resuming from here", file=sys.stderr)
-    cmd = ["claude", "--resume", d.get("sessionId"), *extra]
+    cmd = resume_cmd(d, skip_permissions, extra)
     print(f"{DIM}{' '.join(cmd)}  ({short_cwd(cwd)}){RESET}", file=sys.stderr)
     try:
-        os.execvp("claude", cmd)
+        os.execvp(cmd[0], cmd)
     except OSError as e:
-        print(f"failed to exec claude: {e}", file=sys.stderr)
+        print(f"failed to exec {cmd[0]}: {e}", file=sys.stderr)
         return 1
 
 
